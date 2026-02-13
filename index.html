@@ -24,13 +24,15 @@
       }
     </script>
 
-    <!-- Import Map for React modules -->
+    <!-- Import Map for React and Firebase -->
     <script type="importmap">
 {
   "imports": {
     "react": "https://esm.sh/react@18.2.0",
     "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
     "lucide-react": "https://esm.sh/lucide-react@0.294.0",
+    "firebase/app": "https://esm.sh/firebase@10.8.0/app",
+    "firebase/database": "https://esm.sh/firebase@10.8.0/database",
     "react/": "https://esm.sh/react@^19.2.4/"
   }
 }
@@ -45,6 +47,13 @@
         transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
         transition-duration: 200ms;
       }
+      .animate-pulse-green {
+        animation: pulse-green 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+      }
+      @keyframes pulse-green {
+        0%, 100% { opacity: 1; }
+        50% { opacity: .5; }
+      }
     </style>
   </head>
   <body class="bg-gray-50 text-slate-800 antialiased">
@@ -54,7 +63,9 @@
     <script type="text/babel" data-type="module">
       import React, { useState, useEffect, useRef } from 'react';
       import ReactDOM from 'react-dom/client';
-      import { Check, X, Shield, RotateCcw, Download, Upload, Link as LinkIcon, Copy } from 'lucide-react';
+      import { Check, X, RotateCcw, Cloud, CloudOff, Settings, Info } from 'lucide-react';
+      import { initializeApp } from 'firebase/app';
+      import { getDatabase, ref, set, onValue, get } from 'firebase/database';
 
       // --- Constants & Data Structure ---
       const DATA_COLUMNS = [
@@ -105,48 +116,7 @@
       ];
 
       const STORAGE_KEY_DATA = 'dealer_matrix_data_v1';
-
-      // --- Helper: State Compression for URL ---
-      // We compress the boolean states into a hex string to make the URL shareable and short.
-      const compressState = (data) => {
-        let binaryString = '';
-        INITIAL_ROWS.forEach(row => {
-          for (let i = 0; i < 8; i++) {
-            const cellId = `${row.id}-col-${i}`;
-            binaryString += data[cellId] ? '1' : '0';
-          }
-        });
-        // Convert binary to hex
-        let hex = '';
-        for (let i = 0; i < binaryString.length; i += 4) {
-          const chunk = binaryString.substr(i, 4);
-          hex += parseInt(chunk, 2).toString(16);
-        }
-        return hex;
-      };
-
-      const decompressState = (hex) => {
-        if (!hex) return null;
-        let binaryString = '';
-        for (let i = 0; i < hex.length; i++) {
-          const bin = parseInt(hex[i], 16).toString(2).padStart(4, '0');
-          binaryString += bin;
-        }
-
-        const newState = {};
-        let bitIndex = 0;
-        
-        INITIAL_ROWS.forEach(row => {
-          for (let i = 0; i < 8; i++) {
-            const cellId = `${row.id}-col-${i}`;
-            if (bitIndex < binaryString.length) {
-              newState[cellId] = binaryString[bitIndex] === '1';
-              bitIndex++;
-            }
-          }
-        });
-        return newState;
-      };
+      const STORAGE_KEY_FIREBASE = 'dealer_matrix_firebase_config';
 
       // --- Storage Service ---
       const getDefaultState = () => {
@@ -160,31 +130,31 @@
         return defaults;
       };
 
-      const loadMatrixState = () => {
+      const loadLocalState = () => {
         try {
           const stored = localStorage.getItem(STORAGE_KEY_DATA);
           if (stored) return JSON.parse(stored);
           return getDefaultState();
         } catch (e) {
-          console.error("Failed to load state", e);
+          console.error("Failed to load local state", e);
           return getDefaultState();
         }
       };
 
-      const saveMatrixState = (state) => {
+      const saveLocalState = (state) => {
         try {
           localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(state));
         } catch (e) {
-          console.error("Failed to save state", e);
+          console.error("Failed to save local state", e);
         }
       };
 
       // --- Components ---
-      const MatrixCell = ({ id, isActive, onToggle }) => {
+      const MatrixCell = ({ id, isActive, onToggle, disabled }) => {
         return (
           <td 
-            onClick={() => onToggle(id)}
-            className="border-r border-b border-gray-300 p-4 text-center align-middle cursor-pointer hover:bg-gray-50 transition-colors duration-200"
+            onClick={() => !disabled && onToggle(id)}
+            className={`border-r border-b border-gray-300 p-4 text-center align-middle transition-colors duration-200 ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer hover:bg-gray-50'}`}
           >
             <div className="flex flex-col items-center justify-center">
               {isActive ? (
@@ -197,7 +167,7 @@
         );
       };
 
-      const MatrixTable = ({ data, onToggle }) => {
+      const MatrixTable = ({ data, onToggle, disabled }) => {
         return (
           <div className="overflow-x-auto shadow-lg rounded-lg border border-gray-300 bg-white">
             <table className="w-full border-collapse min-w-[1000px]">
@@ -243,6 +213,7 @@
                           id={cellId}
                           isActive={!!data[cellId]}
                           onToggle={onToggle}
+                          disabled={disabled}
                         />
                       );
                     })}
@@ -254,106 +225,166 @@
         );
       };
 
+      const ConfigModal = ({ isOpen, onClose, onSave, currentConfig }) => {
+        const [configInput, setConfigInput] = useState('');
+
+        useEffect(() => {
+          if (isOpen && currentConfig) {
+            setConfigInput(JSON.stringify(currentConfig, null, 2));
+          }
+        }, [isOpen, currentConfig]);
+
+        const handleSave = () => {
+          try {
+            const parsed = JSON.parse(configInput);
+            onSave(parsed);
+            onClose();
+          } catch (e) {
+            alert("Invalid JSON format. Please ensure you pasted the entire config object from Firebase.");
+          }
+        };
+
+        if (!isOpen) return null;
+
+        return (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6">
+              <h2 className="text-lg font-bold text-gray-800 mb-2 flex items-center gap-2">
+                <Cloud className="w-5 h-5 text-custom-purple" /> Setup Real-time Sync
+              </h2>
+              <p className="text-sm text-gray-600 mb-4">
+                To enable Google Docs-style live syncing across multiple users, you need a free Firebase Realtime Database.
+              </p>
+              
+              <ol className="list-decimal list-inside text-xs text-gray-500 mb-4 space-y-1 bg-gray-50 p-3 rounded">
+                <li>Go to <a href="https://console.firebase.google.com" target="_blank" className="text-blue-600 hover:underline">console.firebase.google.com</a></li>
+                <li>Create a project &gt; Build &gt; Realtime Database (Create in Test Mode).</li>
+                <li>Go to Project Settings &gt; General &gt; "Your apps".</li>
+                <li>Select Web &lt;/&gt;, register app, and copy the <code>firebaseConfig</code> object.</li>
+              </ol>
+
+              <textarea
+                value={configInput}
+                onChange={(e) => setConfigInput(e.target.value)}
+                placeholder='Paste your firebaseConfig here: { "apiKey": "...", "authDomain": "...", ... }'
+                className="w-full h-40 border border-gray-300 rounded p-2 text-xs font-mono mb-4 focus:ring-2 focus:ring-purple-500 outline-none"
+              />
+
+              <div className="flex justify-end gap-3">
+                <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded">Cancel</button>
+                <button onClick={handleSave} className="px-4 py-2 text-sm bg-custom-purple text-white hover:bg-purple-700 rounded shadow-sm">Connect Cloud</button>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
       // --- Main App Component ---
       const App = () => {
         const [data, setData] = useState({});
         const [loading, setLoading] = useState(true);
-        const [notification, setNotification] = useState(null);
-        const fileInputRef = useRef(null);
+        const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
+        
+        // Firebase State
+        const [firebaseConfig, setFirebaseConfig] = useState(null);
+        const [isFirebaseConnected, setIsFirebaseConnected] = useState(false);
+        const [db, setDb] = useState(null);
 
-        // 1. Load Data on Mount (Check URL first, then LocalStorage)
+        // Load Config & Initial Data
         useEffect(() => {
-          // Check for ?s= HEX string in URL
-          const params = new URLSearchParams(window.location.search);
-          const urlStateHex = params.get('s');
-          
-          if (urlStateHex) {
-            const decodedData = decompressState(urlStateHex);
-            if (decodedData) {
-              setData(decodedData);
-              saveMatrixState(decodedData);
-              // Clean URL
-              window.history.replaceState({}, '', window.location.pathname);
-              showNotification('State loaded from Shared Link!', 'success');
-              setLoading(false);
-              return;
+          // 1. Load Data
+          const localData = loadLocalState();
+          setData(localData);
+
+          // 2. Load Config
+          const storedConfig = localStorage.getItem(STORAGE_KEY_FIREBASE);
+          if (storedConfig) {
+            try {
+              const config = JSON.parse(storedConfig);
+              setFirebaseConfig(config);
+              initializeFirebase(config);
+            } catch (e) {
+              console.error("Invalid stored config");
             }
           }
 
-          // Fallback to LocalStorage
-          const savedData = loadMatrixState();
-          setData(savedData);
           setLoading(false);
         }, []);
 
-        // Notification Helper
-        const showNotification = (msg, type = 'info') => {
-          setNotification({ msg, type });
-          setTimeout(() => setNotification(null), 3000);
+        const initializeFirebase = (config) => {
+          try {
+            const app = initializeApp(config);
+            const database = getDatabase(app);
+            setDb(database);
+            
+            const dataRef = ref(database, 'dealer-matrix');
+            
+            // Listen for changes
+            onValue(dataRef, (snapshot) => {
+              const remoteData = snapshot.val();
+              if (remoteData) {
+                setData(remoteData);
+                saveLocalState(remoteData); // Keep local backup synced
+                setIsFirebaseConnected(true);
+              } else {
+                // If remote is empty, push local data
+                set(dataRef, loadLocalState());
+                setIsFirebaseConnected(true);
+              }
+            }, (error) => {
+              console.error("Firebase error:", error);
+              setIsFirebaseConnected(false);
+            });
+
+          } catch (e) {
+            console.error("Firebase init failed:", e);
+            setIsFirebaseConnected(false);
+          }
+        };
+
+        const handleSaveConfig = (config) => {
+          localStorage.setItem(STORAGE_KEY_FIREBASE, JSON.stringify(config));
+          setFirebaseConfig(config);
+          initializeFirebase(config);
+          window.location.reload(); // Simple reload to ensure clean connection
+        };
+
+        const handleClearConfig = () => {
+          if (confirm("Disconnect from cloud? You will return to local-only mode.")) {
+            localStorage.removeItem(STORAGE_KEY_FIREBASE);
+            setFirebaseConfig(null);
+            setIsFirebaseConnected(false);
+            setDb(null);
+            window.location.reload();
+          }
         };
 
         const handleToggle = (id) => {
           const newData = { ...data, [id]: !data[id] };
+          
+          // Optimistic update
           setData(newData);
-          saveMatrixState(newData);
+          saveLocalState(newData);
+
+          // Remote update
+          if (db && isFirebaseConnected) {
+            set(ref(db, 'dealer-matrix'), newData).catch(err => {
+              console.error("Failed to push to cloud", err);
+              alert("Sync error: Could not save to cloud.");
+            });
+          }
         };
 
         const handleReset = () => {
           if (window.confirm('Are you sure you want to reset all permissions to their default state?')) {
-            localStorage.removeItem(STORAGE_KEY_DATA);
             const defaults = getDefaultState();
             setData(defaults);
-            saveMatrixState(defaults);
-            showNotification('Reset to defaults.');
-          }
-        };
-
-        // --- JSON Export/Import ---
-        const handleDownloadJson = () => {
-          const jsonString = JSON.stringify(data, null, 2);
-          const blob = new Blob([jsonString], { type: "application/json" });
-          const url = URL.createObjectURL(blob);
-          const link = document.createElement("a");
-          link.href = url;
-          link.download = `dealer-matrix-${new Date().toISOString().slice(0, 10)}.json`;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          showNotification('Config downloaded!');
-        };
-
-        const handleUploadClick = () => {
-          fileInputRef.current?.click();
-        };
-
-        const handleFileChange = (e) => {
-          const file = e.target.files?.[0];
-          if (!file) return;
-          
-          const reader = new FileReader();
-          reader.onload = (event) => {
-            try {
-              const importedData = JSON.parse(event.target.result);
-              // Basic validation could go here
-              setData(importedData);
-              saveMatrixState(importedData);
-              showNotification('Config imported successfully!', 'success');
-            } catch (err) {
-              alert('Invalid JSON file');
+            saveLocalState(defaults);
+            
+            if (db && isFirebaseConnected) {
+              set(ref(db, 'dealer-matrix'), defaults);
             }
-          };
-          reader.readAsText(file);
-          // Reset input
-          e.target.value = '';
-        };
-
-        // --- Link Sharing ---
-        const handleCopyLink = () => {
-          const hex = compressState(data);
-          const url = `${window.location.origin}${window.location.pathname}?s=${hex}`;
-          navigator.clipboard.writeText(url).then(() => {
-            showNotification('Shareable Link copied to clipboard!', 'success');
-          });
+          }
         };
 
         if (loading) return <div className="flex h-screen items-center justify-center">Loading...</div>;
@@ -362,45 +393,43 @@
           <div className="min-h-screen bg-gray-50 flex flex-col">
             {/* Header */}
             <header className="bg-white border-b border-gray-200 px-6 py-4 shadow-sm sticky top-0 z-10">
-              <div className="max-w-[1400px] mx-auto flex flex-col xl:flex-row justify-between items-center gap-4">
+              <div className="max-w-[1400px] mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
                 <div>
                   <h1 className="text-xl font-bold text-gray-800">Dealer Permissions Matrix</h1>
-                  <p className="text-sm text-gray-500 mt-1">Admin Mode • Changes auto-save locally</p>
+                  <div className="flex items-center gap-2 mt-1">
+                    {isFirebaseConnected ? (
+                      <span className="flex items-center gap-1.5 text-sm font-medium text-green-600 bg-green-50 px-2 py-0.5 rounded-full border border-green-200">
+                        <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse-green"></span>
+                        Live Sync Active
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1.5 text-sm font-medium text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full border border-gray-200">
+                        <span className="w-2 h-2 rounded-full bg-gray-400"></span>
+                        Local Mode (Offline)
+                      </span>
+                    )}
+                  </div>
                 </div>
                 
-                <div className="flex flex-wrap gap-2 justify-center">
-                  <button 
-                    onClick={handleCopyLink}
-                    className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-custom-purple bg-purple-50 hover:bg-purple-100 rounded-md transition-colors border border-purple-200"
-                    title="Copy a link that contains the current state"
-                  >
-                    <LinkIcon className="w-4 h-4" /> Share Link
-                  </button>
+                <div className="flex items-center gap-3">
+                  {!isFirebaseConnected ? (
+                    <button 
+                      onClick={() => setIsConfigModalOpen(true)}
+                      className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-custom-purple hover:bg-purple-700 rounded-md transition-colors shadow-sm"
+                    >
+                      <Cloud className="w-4 h-4" /> Setup Cloud Sync
+                    </button>
+                  ) : (
+                    <button 
+                      onClick={handleClearConfig}
+                      className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors border border-gray-200"
+                      title="Disconnect Cloud"
+                    >
+                      <CloudOff className="w-4 h-4" /> Disconnect
+                    </button>
+                  )}
 
-                  <button 
-                    onClick={handleDownloadJson}
-                    className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 rounded-md transition-colors border border-gray-300"
-                    title="Download JSON file"
-                  >
-                    <Download className="w-4 h-4" /> Save JSON
-                  </button>
-
-                  <button 
-                    onClick={handleUploadClick}
-                    className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 rounded-md transition-colors border border-gray-300"
-                    title="Upload JSON file"
-                  >
-                    <Upload className="w-4 h-4" /> Load JSON
-                  </button>
-                  <input 
-                    type="file" 
-                    ref={fileInputRef} 
-                    onChange={handleFileChange} 
-                    accept=".json" 
-                    className="hidden" 
-                  />
-
-                  <div className="w-px h-8 bg-gray-300 mx-2 hidden md:block"></div>
+                  <div className="w-px h-8 bg-gray-300 hidden md:block"></div>
 
                   <button 
                     onClick={handleReset}
@@ -412,23 +441,31 @@
               </div>
             </header>
 
-            {/* Notification Toast */}
-            {notification && (
-              <div className={`fixed top-20 right-6 z-50 px-4 py-3 rounded shadow-lg text-white text-sm font-medium animate-bounce ${notification.type === 'success' ? 'bg-green-600' : 'bg-gray-800'}`}>
-                {notification.msg}
-              </div>
-            )}
-
             {/* Main Content */}
             <main className="flex-1 overflow-auto p-4 md:p-8">
               <div className="max-w-[1400px] mx-auto">
-                <MatrixTable data={data} onToggle={handleToggle} />
+                <MatrixTable 
+                  data={data} 
+                  onToggle={handleToggle} 
+                />
                 
-                <div className="mt-8 text-sm text-gray-400 text-center flex flex-col gap-2">
-                  <p>To persist data across devices, use the "Share Link" or "Save JSON" buttons above.</p>
+                <div className="mt-8 text-sm text-gray-400 text-center">
+                  {!isFirebaseConnected ? (
+                    <p>Currently in Local Mode. Changes are only saved on this device. <button onClick={() => setIsConfigModalOpen(true)} className="text-custom-purple hover:underline">Connect Cloud</button> to sync across devices.</p>
+                  ) : (
+                    <p>Cloud Mode Active. Changes are syncing in real-time to all connected devices.</p>
+                  )}
                 </div>
               </div>
             </main>
+
+            {/* Config Modal */}
+            <ConfigModal 
+              isOpen={isConfigModalOpen} 
+              onClose={() => setIsConfigModalOpen(false)} 
+              onSave={handleSaveConfig}
+              currentConfig={firebaseConfig}
+            />
           </div>
         );
       };
