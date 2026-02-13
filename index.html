@@ -24,15 +24,13 @@
       }
     </script>
 
-    <!-- Import Map for React and Firebase -->
+    <!-- Import Map for React -->
     <script type="importmap">
 {
   "imports": {
     "react": "https://esm.sh/react@18.2.0",
     "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
     "lucide-react": "https://esm.sh/lucide-react@0.294.0",
-    "firebase/app": "https://esm.sh/firebase@10.8.0/app",
-    "firebase/database": "https://esm.sh/firebase@10.8.0/database",
     "react/": "https://esm.sh/react@^19.2.4/"
   }
 }
@@ -47,12 +45,15 @@
         transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
         transition-duration: 200ms;
       }
-      .animate-pulse-green {
-        animation: pulse-green 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+      .loader-dots:after {
+        content: ' .';
+        animation: dots 1s steps(5, end) infinite;
       }
-      @keyframes pulse-green {
-        0%, 100% { opacity: 1; }
-        50% { opacity: .5; }
+      @keyframes dots {
+        0%, 20% { content: ' .'; }
+        40% { content: ' ..'; }
+        60% { content: ' ...'; }
+        80%, 100% { content: ''; }
       }
     </style>
   </head>
@@ -61,11 +62,9 @@
 
     <!-- Main Application Script -->
     <script type="text/babel" data-type="module">
-      import React, { useState, useEffect, useRef } from 'react';
+      import React, { useState, useEffect, useRef, useCallback } from 'react';
       import ReactDOM from 'react-dom/client';
-      import { Check, X, RotateCcw, Cloud, CloudOff, Settings, Info } from 'lucide-react';
-      import { initializeApp } from 'firebase/app';
-      import { getDatabase, ref, set, onValue, get } from 'firebase/database';
+      import { Check, X, RotateCcw, Github, Save, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
 
       // --- Constants & Data Structure ---
       const DATA_COLUMNS = [
@@ -116,9 +115,9 @@
       ];
 
       const STORAGE_KEY_DATA = 'dealer_matrix_data_v1';
-      const STORAGE_KEY_FIREBASE = 'dealer_matrix_firebase_config';
+      const STORAGE_KEY_GITHUB = 'dealer_matrix_github_config';
 
-      // --- Storage Service ---
+      // --- Helper: Default State ---
       const getDefaultState = () => {
         const defaults = {};
         INITIAL_ROWS.forEach(row => {
@@ -130,23 +129,62 @@
         return defaults;
       };
 
-      const loadLocalState = () => {
-        try {
-          const stored = localStorage.getItem(STORAGE_KEY_DATA);
-          if (stored) return JSON.parse(stored);
-          return getDefaultState();
-        } catch (e) {
-          console.error("Failed to load local state", e);
-          return getDefaultState();
-        }
+      // --- GitHub API Service ---
+      const GITHUB_API_BASE = 'https://api.github.com';
+
+      const fetchGitHubFile = async (token, owner, repo, path) => {
+        const url = `${GITHUB_API_BASE}/repos/${owner}/${repo}/contents/${path}`;
+        const headers = {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/vnd.github.v3+json',
+        };
+        
+        const response = await fetch(url, { headers, cache: 'no-store' });
+        
+        if (response.status === 404) return null; // File doesn't exist
+        if (response.status === 401) throw new Error('Invalid GitHub Token');
+        if (!response.ok) throw new Error('Failed to fetch from GitHub');
+        
+        const data = await response.json();
+        // Decode Base64 content (handling UTF-8)
+        const content = decodeURIComponent(escape(window.atob(data.content.replace(/\s/g, ''))));
+        
+        return {
+          sha: data.sha,
+          content: JSON.parse(content)
+        };
       };
 
-      const saveLocalState = (state) => {
-        try {
-          localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(state));
-        } catch (e) {
-          console.error("Failed to save local state", e);
+      const saveGitHubFile = async (token, owner, repo, path, content, sha) => {
+        const url = `${GITHUB_API_BASE}/repos/${owner}/${repo}/contents/${path}`;
+        
+        // Encode content to Base64
+        const contentStr = JSON.stringify(content, null, 2);
+        const contentBase64 = window.btoa(unescape(encodeURIComponent(contentStr)));
+
+        const body = {
+          message: `Update matrix state [skip ci] - ${new Date().toISOString()}`,
+          content: contentBase64,
+          sha: sha // Needed to update existing file
+        };
+
+        const response = await fetch(url, {
+          method: 'PUT',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/vnd.github.v3+json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(body)
+        });
+
+        if (!response.ok) {
+          const err = await response.json();
+          throw new Error(err.message || 'Failed to save to GitHub');
         }
+
+        const data = await response.json();
+        return data.content.sha; // Return new SHA
       };
 
       // --- Components ---
@@ -225,54 +263,84 @@
         );
       };
 
-      const ConfigModal = ({ isOpen, onClose, onSave, currentConfig }) => {
-        const [configInput, setConfigInput] = useState('');
+      const GitHubConfigModal = ({ isOpen, onClose, onSave, currentConfig }) => {
+        const [token, setToken] = useState('');
+        const [repo, setRepo] = useState('');
+        const [path, setPath] = useState('matrix-data.json');
 
         useEffect(() => {
           if (isOpen && currentConfig) {
-            setConfigInput(JSON.stringify(currentConfig, null, 2));
+            setToken(currentConfig.token || '');
+            setRepo(currentConfig.repo || '');
+            setPath(currentConfig.path || 'matrix-data.json');
           }
         }, [isOpen, currentConfig]);
 
         const handleSave = () => {
-          try {
-            const parsed = JSON.parse(configInput);
-            onSave(parsed);
-            onClose();
-          } catch (e) {
-            alert("Invalid JSON format. Please ensure you pasted the entire config object from Firebase.");
+          if(!token || !repo || !path) {
+            alert("All fields are required.");
+            return;
           }
+          // Basic validation for repo format 'owner/repo'
+          if(repo.indexOf('/') === -1) {
+            alert("Repository must be in format 'owner/repo' (e.g. afdossa/ExampleWorkingDocument)");
+            return;
+          }
+          onSave({ token, repo, path });
+          onClose();
         };
 
         if (!isOpen) return null;
 
         return (
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-lg shadow-xl max-w-lg w-full p-6">
+            <div className="bg-white rounded-lg shadow-xl max-w-md w-full p-6">
               <h2 className="text-lg font-bold text-gray-800 mb-2 flex items-center gap-2">
-                <Cloud className="w-5 h-5 text-custom-purple" /> Setup Real-time Sync
+                <Github className="w-5 h-5 text-black" /> Connect to GitHub
               </h2>
               <p className="text-sm text-gray-600 mb-4">
-                To enable Google Docs-style live syncing across multiple users, you need a free Firebase Realtime Database.
+                This will save the matrix state directly to a JSON file in your repository.
               </p>
               
-              <ol className="list-decimal list-inside text-xs text-gray-500 mb-4 space-y-1 bg-gray-50 p-3 rounded">
-                <li>Go to <a href="https://console.firebase.google.com" target="_blank" className="text-blue-600 hover:underline">console.firebase.google.com</a></li>
-                <li>Create a project &gt; Build &gt; Realtime Database (Create in Test Mode).</li>
-                <li>Go to Project Settings &gt; General &gt; "Your apps".</li>
-                <li>Select Web &lt;/&gt;, register app, and copy the <code>firebaseConfig</code> object.</li>
-              </ol>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">GitHub Personal Access Token (Repo scope)</label>
+                  <input 
+                    type="password" 
+                    value={token}
+                    onChange={e => setToken(e.target.value)}
+                    placeholder="ghp_xxxxxxxxxxxx"
+                    className="w-full border border-gray-300 rounded p-2 text-sm focus:ring-2 focus:ring-black outline-none"
+                  />
+                  <p className="text-[10px] text-gray-500 mt-1">Generate at Settings &gt; Developer settings &gt; Personal access tokens.</p>
+                </div>
 
-              <textarea
-                value={configInput}
-                onChange={(e) => setConfigInput(e.target.value)}
-                placeholder='Paste your firebaseConfig here: { "apiKey": "...", "authDomain": "...", ... }'
-                className="w-full h-40 border border-gray-300 rounded p-2 text-xs font-mono mb-4 focus:ring-2 focus:ring-purple-500 outline-none"
-              />
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">Repository (Owner/Name)</label>
+                  <input 
+                    type="text" 
+                    value={repo}
+                    onChange={e => setRepo(e.target.value)}
+                    placeholder="username/repository-name"
+                    className="w-full border border-gray-300 rounded p-2 text-sm focus:ring-2 focus:ring-black outline-none"
+                  />
+                </div>
 
-              <div className="flex justify-end gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">File Path</label>
+                  <input 
+                    type="text" 
+                    value={path}
+                    onChange={e => setPath(e.target.value)}
+                    placeholder="data/matrix.json"
+                    className="w-full border border-gray-300 rounded p-2 text-sm focus:ring-2 focus:ring-black outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-3 mt-6">
                 <button onClick={onClose} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded">Cancel</button>
-                <button onClick={handleSave} className="px-4 py-2 text-sm bg-custom-purple text-white hover:bg-purple-700 rounded shadow-sm">Connect Cloud</button>
+                <button onClick={handleSave} className="px-4 py-2 text-sm bg-black text-white hover:bg-gray-800 rounded shadow-sm">Save Configuration</button>
               </div>
             </div>
           </div>
@@ -281,110 +349,160 @@
 
       // --- Main App Component ---
       const App = () => {
-        const [data, setData] = useState({});
+        const [data, setData] = useState(getDefaultState());
         const [loading, setLoading] = useState(true);
         const [isConfigModalOpen, setIsConfigModalOpen] = useState(false);
         
-        // Firebase State
-        const [firebaseConfig, setFirebaseConfig] = useState(null);
-        const [isFirebaseConnected, setIsFirebaseConnected] = useState(false);
-        const [db, setDb] = useState(null);
+        // GitHub State
+        const [ghConfig, setGhConfig] = useState(null);
+        const [fileSha, setFileSha] = useState(null);
+        const [syncStatus, setSyncStatus] = useState('offline'); // offline, syncing, saved, error
+        const [lastSavedTime, setLastSavedTime] = useState(null);
 
-        // Load Config & Initial Data
+        // Debounce timer ref
+        const saveTimeoutRef = useRef(null);
+
+        // 1. Initial Load
         useEffect(() => {
-          // 1. Load Data
-          const localData = loadLocalState();
-          setData(localData);
+          // Load local data first
+          const localDataStr = localStorage.getItem(STORAGE_KEY_DATA);
+          if (localDataStr) setData(JSON.parse(localDataStr));
 
-          // 2. Load Config
-          const storedConfig = localStorage.getItem(STORAGE_KEY_FIREBASE);
+          // Load GitHub config
+          const storedConfig = localStorage.getItem(STORAGE_KEY_GITHUB);
           if (storedConfig) {
-            try {
-              const config = JSON.parse(storedConfig);
-              setFirebaseConfig(config);
-              initializeFirebase(config);
-            } catch (e) {
-              console.error("Invalid stored config");
-            }
+            const config = JSON.parse(storedConfig);
+            setGhConfig(config);
+            // Fetch remote data
+            fetchRemoteData(config);
+          } else {
+            setLoading(false);
           }
-
-          setLoading(false);
         }, []);
 
-        const initializeFirebase = (config) => {
+        const fetchRemoteData = async (config) => {
+          setSyncStatus('syncing');
           try {
-            const app = initializeApp(config);
-            const database = getDatabase(app);
-            setDb(database);
+            const result = await fetchGitHubFile(config.token, config.repo.split('/')[0], config.repo.split('/')[1], config.path);
             
-            const dataRef = ref(database, 'dealer-matrix');
-            
-            // Listen for changes
-            onValue(dataRef, (snapshot) => {
-              const remoteData = snapshot.val();
-              if (remoteData) {
-                setData(remoteData);
-                saveLocalState(remoteData); // Keep local backup synced
-                setIsFirebaseConnected(true);
-              } else {
-                // If remote is empty, push local data
-                set(dataRef, loadLocalState());
-                setIsFirebaseConnected(true);
-              }
-            }, (error) => {
-              console.error("Firebase error:", error);
-              setIsFirebaseConnected(false);
-            });
-
+            if (result) {
+              setData(result.content);
+              setFileSha(result.sha);
+              // Update local cache
+              localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(result.content));
+              setLastSavedTime(new Date());
+              setSyncStatus('saved');
+            } else {
+              // File doesn't exist yet, we will create it on first save
+              setSyncStatus('saved'); // Technically "ready to save"
+            }
           } catch (e) {
-            console.error("Firebase init failed:", e);
-            setIsFirebaseConnected(false);
+            console.error(e);
+            setSyncStatus('error');
+            if (e.message === 'Invalid GitHub Token') {
+              alert("GitHub Token is invalid. Please update configuration.");
+              setIsConfigModalOpen(true);
+            }
+          } finally {
+            setLoading(false);
           }
         };
 
         const handleSaveConfig = (config) => {
-          localStorage.setItem(STORAGE_KEY_FIREBASE, JSON.stringify(config));
-          setFirebaseConfig(config);
-          initializeFirebase(config);
-          window.location.reload(); // Simple reload to ensure clean connection
+          localStorage.setItem(STORAGE_KEY_GITHUB, JSON.stringify(config));
+          setGhConfig(config);
+          fetchRemoteData(config); // Initial fetch
         };
 
-        const handleClearConfig = () => {
-          if (confirm("Disconnect from cloud? You will return to local-only mode.")) {
-            localStorage.removeItem(STORAGE_KEY_FIREBASE);
-            setFirebaseConfig(null);
-            setIsFirebaseConnected(false);
-            setDb(null);
-            window.location.reload();
+        const handleDisconnect = () => {
+          if(confirm("Disconnect GitHub? The app will revert to local-only mode.")) {
+            localStorage.removeItem(STORAGE_KEY_GITHUB);
+            setGhConfig(null);
+            setSyncStatus('offline');
+            setFileSha(null);
           }
         };
+
+        // --- Auto-Save Logic ---
+        const triggerAutoSave = useCallback((newData) => {
+          if (!ghConfig) return;
+
+          // Clear existing timer
+          if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+
+          setSyncStatus('pending'); // Visual indicator: "Saving..."
+
+          // Set new timer (Debounce 2 seconds)
+          saveTimeoutRef.current = setTimeout(async () => {
+            setSyncStatus('syncing');
+            try {
+              const [owner, repoName] = ghConfig.repo.split('/');
+              
+              // 1. Get latest SHA first (Concurrency check)
+              // In a real robust app, we would merge. Here, we fetch SHA to avoid 409, 
+              // effectively implementing "Last Write Wins".
+              let currentSha = fileSha;
+              try {
+                const latest = await fetchGitHubFile(ghConfig.token, owner, repoName, ghConfig.path);
+                if (latest) currentSha = latest.sha;
+              } catch (e) { /* ignore fetch error, maybe file doesn't exist yet */ }
+
+              // 2. Write file
+              const newSha = await saveGitHubFile(ghConfig.token, owner, repoName, ghConfig.path, newData, currentSha);
+              
+              setFileSha(newSha);
+              setLastSavedTime(new Date());
+              setSyncStatus('saved');
+            } catch (e) {
+              console.error("Save failed", e);
+              setSyncStatus('error');
+            }
+          }, 2000);
+        }, [ghConfig, fileSha]);
 
         const handleToggle = (id) => {
           const newData = { ...data, [id]: !data[id] };
           
-          // Optimistic update
+          // 1. Optimistic Update
           setData(newData);
-          saveLocalState(newData);
+          localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(newData));
 
-          // Remote update
-          if (db && isFirebaseConnected) {
-            set(ref(db, 'dealer-matrix'), newData).catch(err => {
-              console.error("Failed to push to cloud", err);
-              alert("Sync error: Could not save to cloud.");
-            });
-          }
+          // 2. Trigger Auto-save to GitHub
+          triggerAutoSave(newData);
         };
 
         const handleReset = () => {
-          if (window.confirm('Are you sure you want to reset all permissions to their default state?')) {
+          if (window.confirm('Reset all permissions to default?')) {
             const defaults = getDefaultState();
             setData(defaults);
-            saveLocalState(defaults);
-            
-            if (db && isFirebaseConnected) {
-              set(ref(db, 'dealer-matrix'), defaults);
-            }
+            localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(defaults));
+            triggerAutoSave(defaults);
           }
+        };
+
+        // Helper for status UI
+        const renderStatus = () => {
+          if (syncStatus === 'offline') return <span className="text-gray-400 text-xs">Local Only</span>;
+          if (syncStatus === 'syncing') return (
+            <span className="flex items-center gap-1 text-blue-600 text-xs font-medium">
+              <Loader2 className="w-3 h-3 animate-spin" /> Syncing...
+            </span>
+          );
+          if (syncStatus === 'pending') return (
+            <span className="flex items-center gap-1 text-amber-600 text-xs font-medium">
+              <Loader2 className="w-3 h-3 animate-spin" /> Unsaved changes...
+            </span>
+          );
+          if (syncStatus === 'error') return (
+            <span className="flex items-center gap-1 text-red-600 text-xs font-medium" title="Check console or token">
+              <AlertCircle className="w-3 h-3" /> Sync Error
+            </span>
+          );
+          if (syncStatus === 'saved') return (
+            <span className="flex items-center gap-1 text-green-600 text-xs font-medium">
+              <CheckCircle2 className="w-3 h-3" /> Saved to GitHub {lastSavedTime ? `at ${lastSavedTime.toLocaleTimeString()}` : ''}
+            </span>
+          );
         };
 
         if (loading) return <div className="flex h-screen items-center justify-center">Loading...</div>;
@@ -396,37 +514,29 @@
               <div className="max-w-[1400px] mx-auto flex flex-col md:flex-row justify-between items-center gap-4">
                 <div>
                   <h1 className="text-xl font-bold text-gray-800">Dealer Permissions Matrix</h1>
-                  <div className="flex items-center gap-2 mt-1">
-                    {isFirebaseConnected ? (
-                      <span className="flex items-center gap-1.5 text-sm font-medium text-green-600 bg-green-50 px-2 py-0.5 rounded-full border border-green-200">
-                        <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse-green"></span>
-                        Live Sync Active
-                      </span>
-                    ) : (
-                      <span className="flex items-center gap-1.5 text-sm font-medium text-gray-500 bg-gray-100 px-2 py-0.5 rounded-full border border-gray-200">
-                        <span className="w-2 h-2 rounded-full bg-gray-400"></span>
-                        Local Mode (Offline)
-                      </span>
-                    )}
+                  <div className="flex items-center gap-3 mt-1 h-5">
+                    {renderStatus()}
                   </div>
                 </div>
                 
                 <div className="flex items-center gap-3">
-                  {!isFirebaseConnected ? (
+                  {!ghConfig ? (
                     <button 
                       onClick={() => setIsConfigModalOpen(true)}
-                      className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-custom-purple hover:bg-purple-700 rounded-md transition-colors shadow-sm"
+                      className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-black hover:bg-gray-800 rounded-md transition-colors shadow-sm"
                     >
-                      <Cloud className="w-4 h-4" /> Setup Cloud Sync
+                      <Github className="w-4 h-4" /> Connect GitHub
                     </button>
                   ) : (
-                    <button 
-                      onClick={handleClearConfig}
-                      className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors border border-gray-200"
-                      title="Disconnect Cloud"
-                    >
-                      <CloudOff className="w-4 h-4" /> Disconnect
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <span className="text-xs text-gray-400 font-mono hidden lg:block">{ghConfig.repo}/{ghConfig.path}</span>
+                      <button 
+                        onClick={handleDisconnect}
+                        className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors border border-gray-200"
+                      >
+                        Disconnect
+                      </button>
+                    </div>
                   )}
 
                   <div className="w-px h-8 bg-gray-300 hidden md:block"></div>
@@ -450,21 +560,21 @@
                 />
                 
                 <div className="mt-8 text-sm text-gray-400 text-center">
-                  {!isFirebaseConnected ? (
-                    <p>Currently in Local Mode. Changes are only saved on this device. <button onClick={() => setIsConfigModalOpen(true)} className="text-custom-purple hover:underline">Connect Cloud</button> to sync across devices.</p>
+                  {!ghConfig ? (
+                    <p>Local Mode. Connect GitHub to enable cross-device persistence.</p>
                   ) : (
-                    <p>Cloud Mode Active. Changes are syncing in real-time to all connected devices.</p>
+                    <p>Connected to GitHub. Changes are committed automatically after 2 seconds of inactivity.</p>
                   )}
                 </div>
               </div>
             </main>
 
             {/* Config Modal */}
-            <ConfigModal 
+            <GitHubConfigModal 
               isOpen={isConfigModalOpen} 
               onClose={() => setIsConfigModalOpen(false)} 
               onSave={handleSaveConfig}
-              currentConfig={firebaseConfig}
+              currentConfig={ghConfig}
             />
           </div>
         );
