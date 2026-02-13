@@ -1,0 +1,5 @@
+{
+  "name": "Dealer Permissions Matrix",
+  "description": "A persistent, multi-user compatible permissions matrix replicating visual specifications with state management.",
+  "requestFramePermissions": []
+}
