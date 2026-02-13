@@ -58,4 +58,3 @@ export const INITIAL_ROWS: MatrixRow[] = [
 ];
 
 export const STORAGE_KEY_DATA = 'dealer_matrix_data_v1';
-export const STORAGE_KEY_USER = 'dealer_matrix_user_v1';

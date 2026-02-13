@@ -4,11 +4,10 @@ import { MatrixCell } from './MatrixCell';
 
 interface MatrixTableProps {
   data: Record<string, boolean>;
-  canEdit: boolean;
   onToggle: (id: string) => void;
 }
 
-export const MatrixTable: React.FC<MatrixTableProps> = ({ data, canEdit, onToggle }) => {
+export const MatrixTable: React.FC<MatrixTableProps> = ({ data, onToggle }) => {
   return (
     <div className="overflow-x-auto shadow-lg rounded-lg border border-gray-300 bg-white">
       <table className="w-full border-collapse min-w-[1000px]">
@@ -71,7 +70,6 @@ export const MatrixTable: React.FC<MatrixTableProps> = ({ data, canEdit, onToggl
                     key={cellId}
                     id={cellId}
                     isActive={!!data[cellId]}
-                    canEdit={canEdit}
                     onToggle={onToggle}
                   />
                 );

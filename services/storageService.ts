@@ -1,5 +1,4 @@
-import { STORAGE_KEY_DATA, INITIAL_ROWS, STORAGE_KEY_USER } from '../constants';
-import { CellState, User } from '../types';
+import { STORAGE_KEY_DATA, INITIAL_ROWS } from '../constants';
 
 export const loadMatrixState = (): Record<string, boolean> => {
   try {
@@ -28,22 +27,5 @@ export const saveMatrixState = (state: Record<string, boolean>) => {
     localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(state));
   } catch (e) {
     console.error("Failed to save state", e);
-  }
-};
-
-export const loadUser = (): User | null => {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY_USER);
-    return stored ? JSON.parse(stored) : null;
-  } catch {
-    return null;
-  }
-};
-
-export const saveUser = (user: User | null) => {
-  if (user) {
-    localStorage.setItem(STORAGE_KEY_USER, JSON.stringify(user));
-  } else {
-    localStorage.removeItem(STORAGE_KEY_USER);
   }
 };
